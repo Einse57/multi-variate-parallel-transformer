@@ -1,0 +1,40 @@
+# Self-contained requirements for Intel XPU (Meteor Lake / Arc / Data Center Max).
+# This replaces the upstream requirements.txt for XPU environments.
+#
+# Step 1 — install PyTorch+XPU wheels:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu/
+#
+# Step 2 — install this file:
+#   pip install -r requirements-xpu.txt
+
+# ---------- core framework ----------
+# Use pytorch-lightning (standalone), NOT the "lightning" umbrella package.
+# The upstream requirements.txt pins lightning==2.3.3 which is incompatible.
+pytorch-lightning>=2.6.1
+jsonargparse>=4.48.0
+docstring_parser>=0.16
+typing-extensions
+
+# ---------- model ----------
+loralib==0.1.2
+transformers>=4.43.3
+torchtune>=0.6.1
+einops
+ptwt>=0.1.9
+
+# ---------- data / IO ----------
+h5py
+hdf5plugin>=4.4.0
+scipy>=1.14.0
+numpy
+
+# ---------- metrics / logging ----------
+torchmetrics
+tensorboard>=2.17.0
+matplotlib>=3.9.1
+wandb>=0.16.6
+
+# ---------- NOT needed on XPU ----------
+# triton           — Linux-only CUDA kernels; stubbed out in attentions/attn.py
+# flash-attn       — CUDA-only; XPU path uses MVPFormerGQAAttention instead
+# intel-extension-for-pytorch  — archived March 2026; XPU support is in torch>=2.8
