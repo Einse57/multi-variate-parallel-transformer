@@ -1,6 +1,7 @@
 import os
 
 import torch
+import xpu_accelerator  # noqa: F401 — registers XPU with PyTorch Lightning
 from pytorch_lightning.cli import LightningCLI
 
 from eeg_datasets import EEGDataset
@@ -37,11 +38,13 @@ def cli_main():
 
 
 def set_env() -> None:
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+    if torch.cuda.is_available():
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
 
 if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     cli_main()

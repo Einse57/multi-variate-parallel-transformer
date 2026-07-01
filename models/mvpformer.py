@@ -2,15 +2,35 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
-if torch.cuda.get_device_capability()[0] >= 8:
-    from flash_attn.ops.triton.layer_norm import RMSNorm
-else:
+
+def _cuda_capability() -> int:
+    """Return major CUDA compute capability, or 0 if CUDA is unavailable."""
+    try:
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_capability()[0]
+    except Exception:
+        pass
+    return 0
+
+
+try:
+    if _cuda_capability() >= 8:
+        from flash_attn.ops.triton.layer_norm import RMSNorm
+    else:
+        from torch.nn import RMSNorm
+except ImportError:
     from torch.nn import RMSNorm
 
-from deepspeed.ops.adam import FusedAdam
-from deepspeed.runtime.activation_checkpointing.checkpointing import (
-    checkpoint as checkpoint,
-)
+try:
+    from deepspeed.ops.adam import FusedAdam
+except ImportError:
+    FusedAdam = None
+try:
+    from deepspeed.runtime.activation_checkpointing.checkpointing import (
+        checkpoint as checkpoint,
+    )
+except ImportError:
+    from torch.utils.checkpoint import checkpoint  # type: ignore[assignment]
 from eeg_datasets import EEGBatch
 from einops import rearrange
 from layers import MVPFormerGQAAttention, MVPFormerGQAFlashAttention
@@ -106,7 +126,7 @@ class MVPFormerBlock(GPT2Block):
         torch.nn.Module.__init__(self)
         hidden_size = config.hidden_size
         self.ln_1 = RMSNorm(hidden_size, eps=config.layer_norm_epsilon)
-        if torch.cuda.get_device_capability()[0] >= 8:
+        if _cuda_capability() >= 8:
             self.attn = MVPFormerGQAFlashAttention(config, layer_idx=layer_idx)
         else:
             self.attn = MVPFormerGQAAttention(config, layer_idx=layer_idx)
@@ -478,8 +498,19 @@ class HMVPFormer(BrainModel):
                 head_weights = None
             self._load_checkpoint(base_weights, head_weights)
 
+    @staticmethod
+    def _remap_keys(state_dict):
+        """Remap legacy 'genie.' prefix to 'mvpformer.' in checkpoint keys."""
+        remapped = {}
+        for k, v in state_dict.items():
+            if k.startswith("genie."):
+                k = "mvpformer." + k[len("genie."):]
+            remapped[k] = v
+        return remapped
+
     def _load_checkpoint(self, base_weights, head_weights):
         if base_weights is not None:
+            base_weights = self._remap_keys(base_weights)
             base_weights["encoder.ln.weight"] = torch.ones_like(self.encoder.ln.weight)
             self.load_state_dict(base_weights, strict=True)
             print("Base model loaded.")
@@ -844,6 +875,7 @@ class ClassificationHMVPFormer(HMVPFormer):
 
     def _load_checkpoint(self, base_weights, head_weights):
         if base_weights is not None:
+            base_weights = self._remap_keys(base_weights)
             if base_weights["head.head.weight"].shape != self.head.head.weight.shape:
                 del base_weights["head.head.weight"]
             miss_key, un_key = self.load_state_dict(base_weights, strict=False)
@@ -880,6 +912,7 @@ class ClassificationHMVPFormer(HMVPFormer):
             print("Base model loaded.")
 
         if head_weights is not None:
+            head_weights = self._remap_keys(head_weights)
             miss_key, un_key = self.load_state_dict(head_weights, strict=False)
 
             head_missing_keys = [

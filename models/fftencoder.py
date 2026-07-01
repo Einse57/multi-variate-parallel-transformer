@@ -6,9 +6,12 @@ from models import BrainEncoder
 from torch import Tensor, cat, div, nn, no_grad
 from torch.fft import fftn, ifftn, irfftn, rfftn
 
-if torch.cuda.get_device_capability()[0] >= 8:
-    from flash_attn.ops.triton.layer_norm import RMSNorm
-else:
+try:
+    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
+        from flash_attn.ops.triton.layer_norm import RMSNorm
+    else:
+        from torch.nn import RMSNorm
+except (ImportError, Exception):
     from torch.nn import RMSNorm
 
 from models import BrainEncoder

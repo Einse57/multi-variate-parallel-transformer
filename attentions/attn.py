@@ -1,6 +1,14 @@
 from math import sqrt
-from triton import cdiv, jit
-import triton.language as tl
+
+try:
+    from triton import cdiv, jit
+    import triton.language as tl
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
+
+    def cdiv(x, y):
+        return (x + y - 1) // y
 
 import torch
 
@@ -1031,6 +1039,10 @@ class FlashMVPA(torch.autograd.Function):
         rel_bias_chan=True,
         generator=None,
     ):
+        if not HAS_TRITON:
+            raise RuntimeError(
+                "FlashMVPA requires Triton. Use MVPFormerGQAAttention for non-CUDA devices."
+            )
         capability = torch.cuda.get_device_capability()
         if capability[0] < 8:
             raise RuntimeError(
@@ -1052,10 +1064,10 @@ class FlashMVPA(torch.autograd.Function):
         if p_drop > 0:
             p_per_dim = 1 - sqrt(1 - p_drop)
             chan_dropout = (
-                torch.rand(chan_ctx, device="cuda", generator=generator) > p_per_dim
+                torch.rand(chan_ctx, device=q.device, generator=generator) > p_per_dim
             )
             time_dropout = (
-                torch.rand(time_ctx, device="cuda", generator=generator) > p_per_dim
+                torch.rand(time_ctx, device=q.device, generator=generator) > p_per_dim
             )
         else:
             chan_dropout = torch.empty(0)
@@ -1160,6 +1172,7 @@ class FlashMVPA(torch.autograd.Function):
             o,
             L,
         ) = ctx.saved_tensors
+        _device = q.device
         assert q.shape[1] % k_glob.shape[1] == 0
         head_ratio = q.shape[1] // k_glob.shape[1]
         sequence_parallel = ctx.sequence_parallel
@@ -1177,7 +1190,7 @@ class FlashMVPA(torch.autograd.Function):
         dbias_chan = torch.zeros_like(bias_chan, dtype=torch.float32)
         dv = torch.zeros_like(v, dtype=torch.float32)
         if ctx.rel_bias_time:
-            time_block = torch.ones((ctx.chan_ctx, 1), device="cuda")
+            time_block = torch.ones((ctx.chan_ctx, 1), device=_device)
             time_full_blocks = time_block.unsqueeze(0).repeat(
                 cdiv(BLOCK, ctx.chan_ctx), 1, 1
             )
@@ -1186,7 +1199,7 @@ class FlashMVPA(torch.autograd.Function):
             time_csm = torch.zeros(
                 BLOCK + ctx.chan_ctx - 1,
                 next_power_of_2(max_times_in_block),
-                device="cuda",
+                device=_device,
                 dtype=q.dtype,
             )
             time_csm[:, :max_times_in_block] = torch.block_diag(
@@ -1194,19 +1207,19 @@ class FlashMVPA(torch.autograd.Function):
                 (
                     time_last_block
                     if time_last_block.shape[0] > 0
-                    else torch.empty(0, 0, device="cuda")
+                    else torch.empty(0, 0, device=_device)
                 ),
             )
         if ctx.rel_bias_chan:
             chan_len = BLOCK + ctx.chan_ctx - 1
-            chan_block = torch.diag(torch.ones(ctx.chan_ctx, device="cuda"))
+            chan_block = torch.diag(torch.ones(ctx.chan_ctx, device=_device))
             chan_full_blocks = chan_block.unsqueeze(0).repeat(
                 cdiv(chan_len, ctx.chan_ctx), 1, 1
             )
             chan_csm = torch.zeros(
                 chan_len,
                 next_power_of_2(ctx.chan_ctx),
-                device="cuda",
+                device=_device,
                 dtype=q.dtype,
             )
             chan_csm[:, : ctx.chan_ctx] = chan_full_blocks.flatten(0, 1)[:chan_len]

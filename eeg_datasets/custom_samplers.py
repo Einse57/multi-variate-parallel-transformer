@@ -9,7 +9,11 @@ from torch.utils.data._utils.collate import (
     collate_tensor_fn,
     default_collate_fn_map,
 )
-from torch.utils.data.distributed import T_co
+try:
+    from torch.utils.data.distributed import T_co
+except ImportError:
+    from typing import TypeVar
+    T_co = TypeVar("T_co", covariant=True)
 
 
 def multipatient_collate(patients_per_batch):
