@@ -977,7 +977,38 @@ class ClassificationHMVPFormer(HMVPFormer):
             on_epoch=True,
         )
 
+    def _resume_offset(self) -> int:
+        """Return number of batches already persisted in labels.h5."""
+        if not hasattr(self, "_cached_resume_offset"):
+            import os, h5py
+            try:
+                save_dir = self.trainer.loggers[0].save_dir
+                name = self.trainer.loggers[0].name
+                version = self.trainer.loggers[0].version
+                version_str = version if isinstance(version, str) else f"version_{version}"
+                h5_path = os.path.join(save_dir, name, version_str, "labels.h5")
+                if os.path.exists(h5_path):
+                    with h5py.File(h5_path, "r") as f:
+                        n_rows = f["labels"].shape[0]
+                    # each batch is batch_size rows; we use row count directly
+                    self._cached_resume_offset = n_rows
+                    print(f"Resuming: skipping {n_rows} already-saved predictions")
+                else:
+                    self._cached_resume_offset = 0
+            except Exception:
+                self._cached_resume_offset = 0
+        return self._cached_resume_offset
+
     def test_step(self, batch: EEGBatch, batch_idx: int) -> STEP_OUTPUT:
+        # --- resume support: skip batches whose predictions are on disk ---
+        resume = self._resume_offset()
+        if resume > 0:
+            batch_rows = batch.data.shape[0] if not isinstance(batch.data, list) else batch.data[0].shape[0]
+            needed = resume - getattr(self, "_skipped_rows", 0)
+            if needed > 0:
+                self._skipped_rows = getattr(self, "_skipped_rows", 0) + batch_rows
+                return  # already on disk
+        # -----------------------------------------------------------------
         x, y = batch.data, batch.label
         if isinstance(x, list):
             x, y = self._merge_patients(x, y)
@@ -988,6 +1019,8 @@ class ClassificationHMVPFormer(HMVPFormer):
         self.test_f1_score(out.argmax(dim=-1), y.flatten().long())
         self.test_bss(out.argmax(dim=-1), y.flatten().long())
         self.patient_logger.log(out.detach(), batch.id[-1])
+        # flush every batch so Ctrl+C never loses more than 1 batch
+        self.patient_logger.save()
         self.log(
             "test/f1_score",
             self.test_f1_score,

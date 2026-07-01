@@ -15,7 +15,7 @@ class PatientLogger:
         name: str = "lightning_logs",
         version: Optional[Union[int, str]] = None,
         filename: str = "labels",
-        flush_logs_every_n_steps: int = 100,
+        flush_logs_every_n_steps: int = 1,
     ) -> None:
         self._save_dir = os.fspath(save_dir)
         self.name = name
