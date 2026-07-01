@@ -68,6 +68,7 @@ model:
         scale_attn_by_inverse_layer_idx: false
         reorder_and_upcast_attn: false
         lora: true
+        lora_kv: true
     encoder:
       class_path: models.fftencoder.WaveEncoder
       init_args:

@@ -50,16 +50,27 @@ class MVPFormerGQAAttention(torch.nn.Module):
                 bias=False,
                 merge_weights=config.lora_merge,
             )
-            self.c_attn = lora.MergedLinear(
-                self.embed_dim,
-                2 * self.embed_kv_dim,
-                enable_lora=[False, True],
-                lora_dropout=config.lora_dropout,
-                r=config.lora_rank,
-                lora_alpha=config.lora_alpha,
-                bias=False,
-                merge_weights=config.lora_merge,
-            )  # W_q+W_Ein paper +V
+            if config.lora_kv:
+                self.c_attn = lora.Linear(
+                    self.embed_dim,
+                    2 * self.embed_kv_dim,
+                    lora_dropout=config.lora_dropout,
+                    r=config.lora_rank,
+                    lora_alpha=config.lora_alpha,
+                    bias=False,
+                    merge_weights=config.lora_merge,
+                )
+            else:
+                self.c_attn = lora.MergedLinear(
+                    self.embed_dim,
+                    2 * self.embed_kv_dim,
+                    enable_lora=[False, True],
+                    lora_dropout=config.lora_dropout,
+                    r=config.lora_rank,
+                    lora_alpha=config.lora_alpha,
+                    bias=False,
+                    merge_weights=config.lora_merge,
+                )  # W_q+W_Ein paper +V
         else:
             self.q_attn = torch.nn.Linear(self.embed_dim, self.embed_dim, bias=False)
             self.c_attn = torch.nn.Linear(

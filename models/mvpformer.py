@@ -90,6 +90,7 @@ class MVPFormerConfig(GPT2Config):
         lora_rank=8,
         lora_dropout=0,
         lora_merge=True,
+        lora_kv=False,
     ):
         self.n_channels = n_channels
         self.global_att = global_att
@@ -101,6 +102,7 @@ class MVPFormerConfig(GPT2Config):
         self.lora_rank = lora_rank
         self.lora_dropout = lora_dropout
         self.lora_merge = lora_merge
+        self.lora_kv = lora_kv
         super().__init__(
             n_positions=n_positions,
             n_embd=n_embd,
