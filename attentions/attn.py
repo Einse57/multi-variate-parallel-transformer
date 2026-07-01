@@ -10,6 +10,18 @@ except ImportError:
     def cdiv(x, y):
         return (x + y - 1) // y
 
+    def jit(fn):
+        """No-op decorator when Triton is not installed."""
+        return fn
+
+    class _TritonLangStub:
+        """Stub so `tl.constexpr` annotations parse without Triton."""
+        constexpr = None
+        def __getattr__(self, _):
+            return None
+
+    tl = _TritonLangStub()
+
 import torch
 
 
