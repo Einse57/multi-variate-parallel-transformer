@@ -11,7 +11,7 @@
 # Use pytorch-lightning (standalone), NOT the "lightning" umbrella package.
 # The upstream requirements.txt pins lightning==2.3.3 which is incompatible.
 pytorch-lightning>=2.6.1
-jsonargparse>=4.48.0
+jsonargparse[signatures]>=4.48.0
 docstring_parser>=0.16
 typing-extensions
 
