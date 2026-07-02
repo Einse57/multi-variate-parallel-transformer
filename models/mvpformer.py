@@ -300,7 +300,10 @@ class MVPFormerModel(GPT2Model):
             encoder_attention_mask = self.invert_attention_mask(encoder_attention_mask)
         else:
             encoder_attention_mask = None
-        head_mask = self.get_head_mask(head_mask, self.config.n_layer)
+        if hasattr(self, 'get_head_mask'):
+            head_mask = self.get_head_mask(head_mask, self.config.n_layer)
+        else:
+            head_mask = [None] * self.config.n_layer
         position_embeds = self.positional_embedding(position_ids)
         channel_embeds = self.channel_embedding(channel_ids)
         hidden_states = inputs_embeds
