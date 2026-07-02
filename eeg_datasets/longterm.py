@@ -882,7 +882,7 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
         else:
             slow_samples_before = slowdown_indices[position_in_slowdown]
         begin_index = slow_samples_before + samples_after
-        return int(begin_index)
+        return int(np.asarray(begin_index).item())
 
     def _find_second_from_index(
         self, idx: int, slowdown_indices: npt.ArrayLike
