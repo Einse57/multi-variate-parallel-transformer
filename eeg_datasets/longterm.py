@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Tuple, Union
 import h5py
 import hdf5plugin
 import numpy as np
+
+from .ieeg_source import open_patient_file
 import numpy.typing as npt
 import torch
 from torch import Tensor
@@ -188,6 +190,7 @@ class LongTermEEGData(EEGDataset):
         strategy: Optional[str] = None,
         balanced: bool = False,
         slowdown: bool = False,
+        file_picks: Optional[str] = "eeg",
     ) -> None:
         super().__init__()
         self.folder = folder
@@ -198,6 +201,7 @@ class LongTermEEGData(EEGDataset):
         self.limit_train_batches = limit_train_batches
         self.strategy = strategy
         self.balanced = balanced
+        self.file_picks = file_picks
         self.train_patients = self._sanitize_patients(train_patients)
         self.val_patients = self._sanitize_patients(val_patients)
         self.test_patients = self._sanitize_patients(test_patients)
@@ -248,23 +252,42 @@ class LongTermEEGData(EEGDataset):
                 if pat == "":
                     continue
                 id, seizures = pat, []
+            # Try SWEZ-ETHZ ID format first (ID01-ID68)
             id_num = re.search(r"\d+", id)
-            if id_num is None:
-                raise ValueError(f"Patient ID not found.")
-            id_num = id_num[0]
-            id_clean = "ID" + id_num.zfill(2)
-            if id_clean not in _PATIENT_LIST:
-                raise ValueError(
-                    f"Patient ID not found in this dataset, found {id_clean}."
-                )
-            channels = _CHANNELS[_PATIENT_LIST.index(id_clean)]
+            if id_num is not None:
+                id_clean = "ID" + id_num[0].zfill(2)
+                if id_clean in _PATIENT_LIST:
+                    channels = _CHANNELS[_PATIENT_LIST.index(id_clean)]
+                    patients_sane.append(
+                        PatientData(id=id_clean, seizures=seizures, channels=channels)
+                    )
+                    continue
+            # Arbitrary patient ID — use as-is, channels=0 (discovered from file)
             patients_sane.append(
-                PatientData(id=id_clean, seizures=seizures, channels=channels)
+                PatientData(id=id, seizures=seizures, channels=0)
             )
         return patients_sane
 
+    def _resolve_patient_channels(self, patients: List[PatientData]) -> List[PatientData]:
+        """Fill in channels=0 entries by probing the actual file."""
+        resolved = []
+        for p in patients:
+            if p.channels > 0:
+                resolved.append(p)
+                continue
+            try:
+                path = self._find_patient_file(self.folder, p.id)
+                pf = open_patient_file(path, picks=self.file_picks)
+                n_ch = pf["data/ieeg"].shape[0]
+                pf.close() if hasattr(pf, 'close') else None
+                resolved.append(PatientData(id=p.id, seizures=p.seizures, channels=n_ch))
+            except (FileNotFoundError, KeyError):
+                resolved.append(p)
+        return resolved
+
     def setup(self, stage: str) -> None:
         if stage == "fit":
+            self.train_patients = self._resolve_patient_channels(self.train_patients)
             min_train_channels = min([p.channels for p in self.train_patients])
             if isinstance(self.channels, int) or self.channels is None:
                 max_train_channels = self.channels
@@ -302,8 +325,10 @@ class LongTermEEGData(EEGDataset):
                 balanced=self.balanced,
                 slowdown=self.slowdown,
                 sampling_rate=self.sampling_rate,
+                file_picks=self.file_picks,
             )
             if self.val_patients:
+                self.val_patients = self._resolve_patient_channels(self.val_patients)
                 min_val_channels = min([p.channels for p in self.val_patients])
                 if isinstance(self.channels, int):
                     val_channels = list(range(0, min(self.channels, min_val_channels)))
@@ -318,8 +343,10 @@ class LongTermEEGData(EEGDataset):
                     slowdown=False,
                     channels=val_channels,
                     seizures=self.seizures,
+                    file_picks=self.file_picks,
                 )
         if stage == "validate":
+            self.val_patients = self._resolve_patient_channels(self.val_patients)
             min_val_channels = min([p.channels for p in self.val_patients])
             if isinstance(self.channels, int):
                 val_channels = list(range(0, min(self.channels, min_val_channels)))
@@ -335,8 +362,10 @@ class LongTermEEGData(EEGDataset):
                 channels=val_channels,
                 seizures=self.seizures,
                 sampling_rate=self.sampling_rate,
+                file_picks=self.file_picks,
             )
         if stage == "test" or stage == "predict":
+            self.test_patients = self._resolve_patient_channels(self.test_patients)
             min_test_channels = min([p.channels for p in self.test_patients])
             if isinstance(self.channels, int):
                 test_channels = list(range(0, min(self.channels, min_test_channels)))
@@ -368,6 +397,7 @@ class LongTermEEGData(EEGDataset):
                     seizures=self.seizures,
                     start_idx=start_idx,
                     sampling_rate=self.sampling_rate,
+                    file_picks=self.file_picks,
                 )
                 self.dataset_test.append(dataset_test)
 
@@ -486,6 +516,7 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
         strategy: Optional[str] = None,
         start_idx: int = 0,
         balanced: bool = False,
+        file_picks: Optional[str] = "eeg",
     ) -> None:
         self.window_n = window_n
         self.window = window / 1000.0
@@ -495,6 +526,7 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
         self.start_idx = start_idx
         self.seizures = seizures
         self.channels = channels
+        self.file_picks = file_picks
         self.stride = stride / 1000.0
         self.slowdown_stride = self.stride
         if self.slowdown:
@@ -518,7 +550,7 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
         self.seizure_boundaries: List[List[float]] = []
         self.sampling_rates: List[float] = []
         self.srate_conversion: List[float] = []
-        self._patient_files: List[h5py.File] = []
+        self._patient_files: List = []
         self.total_length: int
         self.patients_seizures_indices: List[List[int]] = []
         self.patients_slowdown_indices: List[List[int]] = []
@@ -530,20 +562,48 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
             self.get_trainable_delta()
         self._patient_files = []
 
+    @staticmethod
+    def _find_patient_file(folder: str, patient: str) -> str:
+        """Locate the recording file for *patient* under *folder*.
+
+        Tries, in order:
+          1. {folder}/{patient}/{patient}_total.h5
+          2. {folder}/{patient}/{patient}.edf
+          3. Any single .h5 or .edf in {folder}/{patient}/
+        """
+        patient_dir = os.path.join(folder, patient)
+        # Preferred exact names
+        for name in (f"{patient}_total.h5", f"{patient}.edf"):
+            candidate = os.path.join(patient_dir, name)
+            if os.path.isfile(candidate):
+                return candidate
+        # Fallback: single recording file in the directory
+        for ext in (".h5", ".edf"):
+            matches = [
+                f for f in os.listdir(patient_dir)
+                if f.lower().endswith(ext)
+            ]
+            if len(matches) == 1:
+                return os.path.join(patient_dir, matches[0])
+        raise FileNotFoundError(
+            f"No recording file (.h5 or .edf) found for {patient} "
+            f"in {patient_dir}"
+        )
+
     @property
     def patient_files(self):
         if len(self._patient_files) == 0:
-            self._patient_files = [
-                h5py.File(
-                    os.path.join(
-                        os.path.join(self.folder, patient),
-                        f"{patient}_total.h5",
-                    ),
-                    rdcc_nbytes=1000 * 1024 * 1024,
-                    rdcc_nslots=500 * 100,
-                )
-                for patient in self.patient_ids
-            ]
+            for patient in self.patient_ids:
+                path = self._find_patient_file(self.folder, patient)
+                if path.lower().endswith((".h5", ".hdf5")):
+                    pf = h5py.File(
+                        path,
+                        rdcc_nbytes=1000 * 1024 * 1024,
+                        rdcc_nslots=500 * 100,
+                    )
+                else:
+                    pf = open_patient_file(path, picks=self.file_picks)
+                self._patient_files.append(pf)
         return self._patient_files
 
     def __getitem__(self, n: int) -> Tuple[Tensor, Tensor, int, int, float, float, int]:
@@ -630,8 +690,11 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
 
     def load_info(self) -> None:
         for patient in self.patient_ids:
-            patient_path = os.path.join(self.folder, patient)
-            patient_file = h5py.File(os.path.join(patient_path, f"{patient}_total.h5"))
+            path = self._find_patient_file(self.folder, patient)
+            if path.lower().endswith((".h5", ".hdf5")):
+                patient_file = h5py.File(path)
+            else:
+                patient_file = open_patient_file(path, picks=self.file_picks)
             self._patient_files.append(patient_file)
             seizure_boundaries = patient_file["data/seizures"][:]
             self.seizure_boundaries.append(seizure_boundaries)

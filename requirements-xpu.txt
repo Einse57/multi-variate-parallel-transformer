@@ -27,6 +27,7 @@ ptwt>=0.1.9
 # ---------- data / IO ----------
 h5py
 hdf5plugin>=4.4.0
+mne>=1.7.0                 # EDF/EDF+ file format support
 scipy>=1.14.0
 numpy
 
