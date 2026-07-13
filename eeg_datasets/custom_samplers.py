@@ -17,20 +17,30 @@ except ImportError:
 
 
 def multipatient_collate(patients_per_batch):
-    def multi_collate_tensor_fn(batch, *, collate_fn_map=None):
-        batch_len = len(batch) // patients_per_batch
-        batches = [None] * patients_per_batch
-        for p in range(patients_per_batch):
+    return _MultiPatientCollate(patients_per_batch)
+
+
+class _MultiPatientCollate:
+    """Picklable collate function for multi-patient batches.
+
+    Defined as a class (not a closure) so Windows multiprocessing
+    can pickle it for DataLoader workers.
+    """
+
+    def __init__(self, patients_per_batch: int):
+        self.patients_per_batch = patients_per_batch
+        self._collate_fn_map = default_collate_fn_map.copy()
+        self._collate_fn_map[torch.Tensor] = self._multi_collate_tensor_fn
+
+    def _multi_collate_tensor_fn(self, batch, *, collate_fn_map=None):
+        batch_len = len(batch) // self.patients_per_batch
+        batches = [None] * self.patients_per_batch
+        for p in range(self.patients_per_batch):
             batches[p] = collate_tensor_fn(batch[p * batch_len : (p + 1) * batch_len])
         return batches
 
-    multichannel_collate_fn_map = default_collate_fn_map.copy()
-    multichannel_collate_fn_map[torch.Tensor] = multi_collate_tensor_fn
-
-    def collate_fn(batch):
-        return collate(batch, collate_fn_map=multichannel_collate_fn_map)
-
-    return collate_fn
+    def __call__(self, batch):
+        return collate(batch, collate_fn_map=self._collate_fn_map)
 
 
 class ChunkDistributedSampler(DistributedSampler):
