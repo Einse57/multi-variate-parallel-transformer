@@ -191,6 +191,8 @@ class LongTermEEGData(EEGDataset):
         balanced: bool = False,
         slowdown: bool = False,
         file_picks: Optional[str] = "eeg",
+        preprocess: Union[bool, str] = "auto",
+        notch_freq: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.folder = folder
@@ -202,6 +204,8 @@ class LongTermEEGData(EEGDataset):
         self.strategy = strategy
         self.balanced = balanced
         self.file_picks = file_picks
+        self.preprocess = preprocess
+        self.notch_freq = notch_freq
         self.train_patients = self._sanitize_patients(train_patients)
         self.val_patients = self._sanitize_patients(val_patients)
         self.test_patients = self._sanitize_patients(test_patients)
@@ -253,9 +257,11 @@ class LongTermEEGData(EEGDataset):
                     continue
                 id, seizures = pat, []
             # Try SWEZ-ETHZ ID format first (ID01-ID68)
-            id_num = re.search(r"\d+", id)
-            if id_num is not None:
-                id_clean = "ID" + id_num[0].zfill(2)
+            # Only match IDs that look like SWEZ format: "ID01", "id04", "04", etc.
+            # Don't match arbitrary names that happen to contain digits (e.g. "sub-01")
+            id_match = re.match(r"^(?:ID)?(\d+)$", id, re.IGNORECASE)
+            if id_match is not None:
+                id_clean = "ID" + id_match.group(1).zfill(2)
                 if id_clean in _PATIENT_LIST:
                     channels = _CHANNELS[_PATIENT_LIST.index(id_clean)]
                     patients_sane.append(
@@ -276,8 +282,11 @@ class LongTermEEGData(EEGDataset):
                 resolved.append(p)
                 continue
             try:
-                path = self._find_patient_file(self.folder, p.id)
-                pf = open_patient_file(path, picks=self.file_picks)
+                path = LongTermEEGDataset._find_patient_file(self.folder, p.id)
+                pf = open_patient_file(
+                    path, picks=self.file_picks,
+                    preprocess=self.preprocess, notch_freq=self.notch_freq,
+                )
                 n_ch = pf["data/ieeg"].shape[0]
                 pf.close() if hasattr(pf, 'close') else None
                 resolved.append(PatientData(id=p.id, seizures=p.seizures, channels=n_ch))
@@ -326,6 +335,8 @@ class LongTermEEGData(EEGDataset):
                 slowdown=self.slowdown,
                 sampling_rate=self.sampling_rate,
                 file_picks=self.file_picks,
+                preprocess=self.preprocess,
+                notch_freq=self.notch_freq,
             )
             if self.val_patients:
                 self.val_patients = self._resolve_patient_channels(self.val_patients)
@@ -344,6 +355,8 @@ class LongTermEEGData(EEGDataset):
                     channels=val_channels,
                     seizures=self.seizures,
                     file_picks=self.file_picks,
+                    preprocess=self.preprocess,
+                    notch_freq=self.notch_freq,
                 )
         if stage == "validate":
             self.val_patients = self._resolve_patient_channels(self.val_patients)
@@ -363,6 +376,8 @@ class LongTermEEGData(EEGDataset):
                 seizures=self.seizures,
                 sampling_rate=self.sampling_rate,
                 file_picks=self.file_picks,
+                preprocess=self.preprocess,
+                notch_freq=self.notch_freq,
             )
         if stage == "test" or stage == "predict":
             self.test_patients = self._resolve_patient_channels(self.test_patients)
@@ -398,6 +413,8 @@ class LongTermEEGData(EEGDataset):
                     start_idx=start_idx,
                     sampling_rate=self.sampling_rate,
                     file_picks=self.file_picks,
+                    preprocess=self.preprocess,
+                    notch_freq=self.notch_freq,
                 )
                 self.dataset_test.append(dataset_test)
 
@@ -517,6 +534,8 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
         start_idx: int = 0,
         balanced: bool = False,
         file_picks: Optional[str] = "eeg",
+        preprocess: Union[bool, str] = "auto",
+        notch_freq: Optional[float] = None,
     ) -> None:
         self.window_n = window_n
         self.window = window / 1000.0
@@ -527,6 +546,8 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
         self.seizures = seizures
         self.channels = channels
         self.file_picks = file_picks
+        self.preprocess = preprocess
+        self.notch_freq = notch_freq
         self.stride = stride / 1000.0
         self.slowdown_stride = self.stride
         if self.slowdown:
@@ -602,7 +623,10 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
                         rdcc_nslots=500 * 100,
                     )
                 else:
-                    pf = open_patient_file(path, picks=self.file_picks)
+                    pf = open_patient_file(
+                        path, picks=self.file_picks,
+                        preprocess=self.preprocess, notch_freq=self.notch_freq,
+                    )
                 self._patient_files.append(pf)
         return self._patient_files
 
@@ -694,7 +718,10 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
             if path.lower().endswith((".h5", ".hdf5")):
                 patient_file = h5py.File(path)
             else:
-                patient_file = open_patient_file(path, picks=self.file_picks)
+                patient_file = open_patient_file(
+                    path, picks=self.file_picks,
+                    preprocess=self.preprocess, notch_freq=self.notch_freq,
+                )
             self._patient_files.append(patient_file)
             seizure_boundaries = patient_file["data/seizures"][:]
             self.seizure_boundaries.append(seizure_boundaries)

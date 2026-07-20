@@ -10,6 +10,12 @@ dict-like access pattern used by ``LongTermEEGDataset``:
 
 For H5 files this is just ``h5py.File``.
 For EDF/EDF+ files this is an ``EDFPatientFile`` adapter.
+
+Preprocessing for EDF:
+    The SWEC-ETHZ H5 dataset is already preprocessed (bandpass 0.5–120 Hz,
+    median re-referenced).  Raw EDF files typically are NOT.  Pass
+    ``preprocess=True`` (default) to ``EDFPatientFile`` or
+    ``open_patient_file()`` to apply the same pipeline automatically.
 """
 from __future__ import annotations
 
@@ -75,6 +81,26 @@ class EDFPatientFile:
         Channels whose names match common non-EEG patterns (ECG, EMG,
         EOG, SpO2, etc.) are dropped automatically, even if the EDF
         header marks them as EEG.  This catches mislabelled files.
+
+    Preprocessing (``preprocess`` parameter):
+        SWEC-ETHZ H5 files are already preprocessed (bandpass filtered
+        0.5–120 Hz, median re-referenced).  Raw EDF recordings are not.
+
+        ``preprocess="auto"`` (default):
+            Detects whether each step has already been applied by
+            checking DC offset ratio and cross-channel median.  Steps
+            that appear already done are skipped automatically, so
+            pre-filtered EDF files are not double-processed.
+        ``preprocess=True``:
+            Forces all steps unconditionally.
+        ``preprocess=False``:
+            Skips preprocessing entirely (use when handling it externally).
+
+        Steps (when applied):
+          1. Bandpass 0.5–120 Hz (4th-order Butterworth, zero-phase)
+          2. Optional notch filter (50 or 60 Hz) for powerline noise
+          3. Median re-reference (subtract cross-channel median)
+          4. Resample to 512 Hz
     """
 
     # Patterns that indicate a channel is NOT brain signal.
@@ -94,6 +120,9 @@ class EDFPatientFile:
         path: str | Path,
         *,
         picks: Optional[str | list] = "eeg",
+        preprocess: bool | str = "auto",
+        notch_freq: Optional[float] = None,
+        target_sfreq: float = 512.0,
     ):
         import mne
 
@@ -124,6 +153,33 @@ class EDFPatientFile:
 
         sfreq = float(raw.info["sfreq"])
         data = raw.get_data().astype(np.float32)  # (channels, samples)
+
+        # ── Apply SWEC-paper preprocessing if requested ────────────────
+        #   preprocess="auto" : detect whether steps are needed (default)
+        #   preprocess=True   : force all steps
+        #   preprocess=False  : skip entirely
+        if preprocess is not False:
+            from .edf_preprocess import preprocess_edf_for_mvpformer
+
+            auto = (preprocess == "auto")
+            data, sfreq = preprocess_edf_for_mvpformer(
+                data,
+                sfreq,
+                target_sfreq=target_sfreq,
+                bandpass=True,
+                bandpass_low=0.5,
+                bandpass_high=120.0,
+                bandpass_order=4,
+                notch=notch_freq,
+                do_median_ref=True,
+                do_resample=True,
+                auto_detect=auto,
+            )
+            print(
+                f"  ✓ EDF preprocessing applied (mode={'auto' if auto else 'force'}): "
+                f"resampled to {sfreq} Hz"
+                + (f", notch {notch_freq} Hz" if notch_freq else "")
+            )
 
         # Build seizure structured array from EDF+ annotations
         seizures = self._parse_seizure_annotations(raw.annotations)
@@ -212,7 +268,8 @@ def open_patient_file(path: str | Path, **kwargs):
     For H5 files:  returns ``h5py.File`` directly.
     For EDF files: returns ``EDFPatientFile`` adapter.
 
-    Extra kwargs are forwarded to the constructor (e.g. ``picks`` for EDF).
+    Extra kwargs are forwarded to the constructor (e.g. ``picks`` for EDF,
+    ``preprocess=True/False``, ``notch_freq``).
     """
     p = Path(path)
     ext = p.suffix.lower()
@@ -223,7 +280,10 @@ def open_patient_file(path: str | Path, **kwargs):
         except ImportError:
             pass
         import h5py
-        return h5py.File(str(p), "r", **kwargs)
+        # Strip EDF-only kwargs before passing to h5py
+        h5_kwargs = {k: v for k, v in kwargs.items()
+                     if k not in ("picks", "preprocess", "notch_freq", "target_sfreq")}
+        return h5py.File(str(p), "r", **h5_kwargs)
 
     if ext in _EDF_EXTENSIONS:
         return EDFPatientFile(p, **kwargs)
