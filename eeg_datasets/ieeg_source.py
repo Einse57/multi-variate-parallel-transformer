@@ -1,5 +1,4 @@
-"""
-iEEG data source abstraction — h5py-compatible wrappers for EDF/EDF+.
+"""iEEG data source abstraction — h5py-compatible wrappers for EDF/EDF+.
 
 ``open_patient_file(path)`` returns an object that supports the same
 dict-like access pattern used by ``LongTermEEGDataset``:
@@ -8,7 +7,8 @@ dict-like access pattern used by ``LongTermEEGDataset``:
     f["data/seizures"][:]   →  structured array with 'onsets'/'offsets'
     f.attrs["sampling_rate"]→  float
 
-For H5 files this is just ``h5py.File``.
+For H5 files this is ``h5py.File``, or ``_H5SuperContactsFile`` when
+``super_contacts=True`` is passed.
 For EDF/EDF+ files this is an ``EDFPatientFile`` adapter.
 
 Preprocessing for EDF:
@@ -16,13 +16,69 @@ Preprocessing for EDF:
     median re-referenced).  Raw EDF files typically are NOT.  Pass
     ``preprocess=True`` (default) to ``EDFPatientFile`` or
     ``open_patient_file()`` to apply the same pipeline automatically.
+
+Super-contacts:
+    Pass ``super_contacts=True`` (and optionally ``super_contacts_target``)
+    to ``open_patient_file()`` to average adjacent channel groups, reducing
+    the channel count while preserving LFP signal.  Works for both H5 and
+    EDF sources.  See ``pair_average_channels`` for details.
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+
+# ── Local averaging (Super-Contacts) ──────────────────────────────────────
+#
+# Spatial rationale: adjacent contact pairs share correlated LFP signal while
+# their thermal/amplifier noise is independent.  Averaging N contacts improves
+# SNR by √N (Buzsáki, Anastassiou & Koch, Nat Rev Neurosci 13:407, 2012).
+# For macro-contacts spaced < spatial Nyquist (~1.25 mm), decimation alone
+# discards real focal generators; averaging preserves them in the sum while
+# cancelling uncorrelated noise (Slutzky et al., J Neural Eng 7:026004, 2010).
+#
+# Signal character: the averaged output stays in the same physical units and
+# frequency band as median-referenced LFP — no remontaging artefact, no
+# high-pass bias — making it distribution-compatible with SWEZ-ETHZ training
+# data (Burrello et al., 2019; original SWEZ preprocessing: bandpass 0.5-120 Hz,
+# median re-reference).
+
+
+def pair_average_channels(data: np.ndarray, target: Optional[int] = None) -> np.ndarray:
+    """Average adjacent channel groups to reduce channel count.
+
+    Uses np.array_split so channels are distributed into target bins as evenly
+    as possible (no padding, no duplicated boundary channels).  For C channels
+    split into T bins: (C % T) bins get ceil(C/T) channels, the rest get
+    floor(C/T).  SNR improves by √group_size (Buzsáki et al., 2012).
+
+    Args:
+        data:   (channels, samples) float array.
+        target: desired output channel count.  Defaults to ceil(C/2).
+
+    Returns:
+        (target, samples) array.
+        If the source already has ≤ target channels, returns the source unchanged.
+    """
+    n_ch = data.shape[0]
+
+    if target is None:
+        target = math.ceil(n_ch / 2)
+
+    if target <= 0:
+        raise ValueError(f"target must be a positive integer, got {target}")
+
+    if n_ch <= target:
+        return data
+
+    # Accumulate in float32 to avoid precision loss from averaging float16 inputs.
+    work = data.astype(np.float32, copy=False)
+    groups = np.array_split(work, target, axis=0)
+    return np.stack([g.mean(axis=0) for g in groups]).astype(data.dtype)
 
 
 # ── Dataset-like wrapper for in-memory arrays ─────────────────────────────
@@ -54,6 +110,54 @@ class _ArrayDataset:
 
     def __getitem__(self, key):
         return self._data[key]
+
+
+# ── Super-contacts lazy wrapper ───────────────────────────────────────────
+
+class _SuperContactsDataset:
+    """Wraps any dataset-like (h5py.Dataset or _ArrayDataset) and applies
+    pair_average_channels on every read, reducing the channel dimension.
+
+    Downstream code sees a dataset with shape (target, T) without needing
+    to know whether the source is H5 or EDF.
+    """
+
+    def __init__(self, inner, target: Optional[int] = None):
+        self._inner = inner
+        raw_ch = inner.shape[0]
+        self._out_ch = target if target is not None else math.ceil(raw_ch / 2)
+        # Pass-through when the source is already at or below the requested count.
+        self._passthrough = raw_ch <= self._out_ch
+        self._shape = (raw_ch if self._passthrough else self._out_ch,) + inner.shape[1:]
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def dtype(self):
+        return self._inner.dtype
+
+    def read_direct(self, dest, source_sel=None, dest_sel=None):
+        # Read all channels for the requested time slice, then average.
+        if self._passthrough:
+            return self._inner.read_direct(dest, source_sel, dest_sel)
+        if source_sel is None:
+            raw = self._inner[:]
+        else:
+            # source_sel is typically np.s_[:, t_start:t_end]
+            raw = self._inner[source_sel]
+        averaged = pair_average_channels(raw, target=self._out_ch)
+        if dest_sel is None:
+            dest[:] = averaged
+        else:
+            dest[dest_sel] = averaged
+
+    def __getitem__(self, key):
+        raw = self._inner[key]
+        if self._passthrough or raw.ndim != 2:
+            return raw
+        return pair_average_channels(raw, target=self._out_ch)
 
 
 # ── Attrs-like wrapper ────────────────────────────────────────────────────
@@ -123,6 +227,8 @@ class EDFPatientFile:
         preprocess: bool | str = "auto",
         notch_freq: Optional[float] = None,
         target_sfreq: float = 512.0,
+        super_contacts: bool = False,
+        super_contacts_target: Optional[int] = None,
     ):
         import mne
 
@@ -183,6 +289,10 @@ class EDFPatientFile:
 
         # Build seizure structured array from EDF+ annotations
         seizures = self._parse_seizure_annotations(raw.annotations)
+
+        if super_contacts:
+            data = pair_average_channels(data, target=super_contacts_target)
+            print(f"  ✓ Super-contacts applied: {data.shape[0]} averaged channels")
 
         # Store as dict-like datasets
         self._datasets = {
@@ -262,14 +372,51 @@ _H5_EXTENSIONS = {".h5", ".hdf5"}
 _SUPPORTED = _EDF_EXTENSIONS | _H5_EXTENSIONS
 
 
+class _H5SuperContactsFile:
+    """Thin proxy around h5py.File that returns a _SuperContactsDataset for
+    'data/ieeg' while passing all other key lookups straight through.
+
+    h5py.File is read-only and does not support item assignment, so we wrap
+    it rather than patch it.
+    """
+
+    def __init__(self, h5file, target: Optional[int] = None):
+        self._f = h5file
+        self._target = target
+        self._wrapped = _SuperContactsDataset(h5file["data/ieeg"], target=target)
+
+    def __getitem__(self, key: str):
+        if key == "data/ieeg":
+            return self._wrapped
+        return self._f[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._f
+
+    @property
+    def attrs(self):
+        return self._f.attrs
+
+    def close(self):
+        self._f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
 def open_patient_file(path: str | Path, **kwargs):
     """Open a patient recording file, returning an h5py.File-compatible object.
 
-    For H5 files:  returns ``h5py.File`` directly.
+    For H5 files:  returns ``h5py.File``, or ``_H5SuperContactsFile`` when
+                   ``super_contacts=True`` is in kwargs.
     For EDF files: returns ``EDFPatientFile`` adapter.
 
     Extra kwargs are forwarded to the constructor (e.g. ``picks`` for EDF,
-    ``preprocess=True/False``, ``notch_freq``).
+    ``preprocess=True/False``, ``notch_freq``, ``super_contacts``,
+    ``super_contacts_target``).
     """
     p = Path(path)
     ext = p.suffix.lower()
@@ -280,10 +427,15 @@ def open_patient_file(path: str | Path, **kwargs):
         except ImportError:
             pass
         import h5py
+        sc = kwargs.pop("super_contacts", False)
+        sc_target = kwargs.pop("super_contacts_target", None)
         # Strip EDF-only kwargs before passing to h5py
         h5_kwargs = {k: v for k, v in kwargs.items()
                      if k not in ("picks", "preprocess", "notch_freq", "target_sfreq")}
-        return h5py.File(str(p), "r", **h5_kwargs)
+        f = h5py.File(str(p), "r", **h5_kwargs)
+        if sc:
+            return _H5SuperContactsFile(f, target=sc_target)
+        return f
 
     if ext in _EDF_EXTENSIONS:
         return EDFPatientFile(p, **kwargs)

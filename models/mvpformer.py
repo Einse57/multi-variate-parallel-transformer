@@ -517,6 +517,16 @@ class HMVPFormer(BrainModel):
         if base_weights is not None:
             base_weights = self._remap_keys(base_weights)
             base_weights["encoder.ln.weight"] = torch.ones_like(self.encoder.ln.weight)
+            # Extend channel embedding if config requests more channels than the checkpoint has.
+            ck = "mvpformer.channel_embedding.weight"
+            if ck in base_weights:
+                ckpt_rows = base_weights[ck].shape[0]
+                cfg_rows = self.gpt_config.n_channels
+                if cfg_rows > ckpt_rows:
+                    extra = base_weights[ck][
+                        torch.arange(cfg_rows - ckpt_rows) % ckpt_rows
+                    ]
+                    base_weights[ck] = torch.cat([base_weights[ck], extra], dim=0)
             self.load_state_dict(base_weights, strict=True)
             print("Base model loaded.")
 

@@ -193,10 +193,12 @@ class LongTermEEGData(EEGDataset):
         file_picks: Optional[str] = "eeg",
         preprocess: Union[bool, str] = "auto",
         notch_freq: Optional[float] = None,
+        super_contacts: bool = False,
     ) -> None:
         super().__init__()
         self.folder = folder
         self.batch_size = batch_size
+        self.super_contacts = super_contacts
         self.channels = self._parse_channels(channels)
         self.sampling_rate = sampling_rate
         self.num_workers = num_workers
@@ -206,6 +208,7 @@ class LongTermEEGData(EEGDataset):
         self.file_picks = file_picks
         self.preprocess = preprocess
         self.notch_freq = notch_freq
+        self.super_contacts = super_contacts
         self.train_patients = self._sanitize_patients(train_patients)
         self.val_patients = self._sanitize_patients(val_patients)
         self.test_patients = self._sanitize_patients(test_patients)
@@ -286,6 +289,7 @@ class LongTermEEGData(EEGDataset):
                 pf = open_patient_file(
                     path, picks=self.file_picks,
                     preprocess=self.preprocess, notch_freq=self.notch_freq,
+                    super_contacts=self.super_contacts,
                 )
                 n_ch = pf["data/ieeg"].shape[0]
                 pf.close() if hasattr(pf, 'close') else None
@@ -337,6 +341,7 @@ class LongTermEEGData(EEGDataset):
                 file_picks=self.file_picks,
                 preprocess=self.preprocess,
                 notch_freq=self.notch_freq,
+                super_contacts=self.super_contacts,
             )
             if self.val_patients:
                 self.val_patients = self._resolve_patient_channels(self.val_patients)
@@ -357,6 +362,7 @@ class LongTermEEGData(EEGDataset):
                     file_picks=self.file_picks,
                     preprocess=self.preprocess,
                     notch_freq=self.notch_freq,
+                    super_contacts=self.super_contacts,
                 )
         if stage == "validate":
             self.val_patients = self._resolve_patient_channels(self.val_patients)
@@ -378,6 +384,7 @@ class LongTermEEGData(EEGDataset):
                 file_picks=self.file_picks,
                 preprocess=self.preprocess,
                 notch_freq=self.notch_freq,
+                super_contacts=self.super_contacts,
             )
         if stage == "test" or stage == "predict":
             self.test_patients = self._resolve_patient_channels(self.test_patients)
@@ -415,6 +422,7 @@ class LongTermEEGData(EEGDataset):
                     file_picks=self.file_picks,
                     preprocess=self.preprocess,
                     notch_freq=self.notch_freq,
+                    super_contacts=self.super_contacts,
                 )
                 self.dataset_test.append(dataset_test)
 
@@ -536,6 +544,7 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
         file_picks: Optional[str] = "eeg",
         preprocess: Union[bool, str] = "auto",
         notch_freq: Optional[float] = None,
+        super_contacts: bool = False,
     ) -> None:
         self.window_n = window_n
         self.window = window / 1000.0
@@ -548,6 +557,7 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
         self.file_picks = file_picks
         self.preprocess = preprocess
         self.notch_freq = notch_freq
+        self.super_contacts = super_contacts
         self.stride = stride / 1000.0
         self.slowdown_stride = self.stride
         if self.slowdown:
@@ -617,15 +627,17 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
             for patient in self.patient_ids:
                 path = self._find_patient_file(self.folder, patient)
                 if path.lower().endswith((".h5", ".hdf5")):
-                    pf = h5py.File(
+                    pf = open_patient_file(
                         path,
                         rdcc_nbytes=1000 * 1024 * 1024,
                         rdcc_nslots=500 * 100,
+                        super_contacts=self.super_contacts,
                     )
                 else:
                     pf = open_patient_file(
                         path, picks=self.file_picks,
                         preprocess=self.preprocess, notch_freq=self.notch_freq,
+                        super_contacts=self.super_contacts,
                     )
                 self._patient_files.append(pf)
         return self._patient_files
@@ -715,13 +727,11 @@ class LongTermEEGDataset(Dataset[EEGBatch]):
     def load_info(self) -> None:
         for patient in self.patient_ids:
             path = self._find_patient_file(self.folder, patient)
-            if path.lower().endswith((".h5", ".hdf5")):
-                patient_file = h5py.File(path)
-            else:
-                patient_file = open_patient_file(
-                    path, picks=self.file_picks,
-                    preprocess=self.preprocess, notch_freq=self.notch_freq,
-                )
+            patient_file = open_patient_file(
+                path, picks=self.file_picks,
+                preprocess=self.preprocess, notch_freq=self.notch_freq,
+                super_contacts=self.super_contacts,
+            )
             self._patient_files.append(patient_file)
             seizure_boundaries = patient_file["data/seizures"][:]
             self.seizure_boundaries.append(seizure_boundaries)
